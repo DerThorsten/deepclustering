@@ -28,7 +28,9 @@ class ClusterCallback(nifty.graph.EdgeContractionGraphCallback):
 
         # get the modules from parent
         self.edge_init_module     = cluster_net.edge_init_module  
+        self.node_init_module     = cluster_net.node_init_module  
         self.edge_merge_module    = cluster_net.edge_merge_module   
+        self.node_merge_module    = cluster_net.node_merge_module   
         self.edge_priority_module = cluster_net.edge_priority_module
 
 
@@ -57,10 +59,10 @@ class ClusterCallback(nifty.graph.EdgeContractionGraphCallback):
             nf = node_feat[n,:]
             nf  = torch.from_numpy(nf[None,:])
             nf  = Variable(nf,requires_grad=True)
-            tl_node_features[n] = nf
+            tl_node_features[n] = self.node_init_module(nf)
 
 
-
+        self.rag = rag
 
 
         self.tl_edge_features = tl_edge_features
@@ -74,16 +76,21 @@ class ClusterCallback(nifty.graph.EdgeContractionGraphCallback):
         # the prio-queue
         self.pq =nifty.tools.ChangeablePriorityQueue(rag.numberOfEdges)
 
-        for e in rag.edges():
+        #for e in rag.edges():
+        #    self.pq.push(e, self.get_float_priority(e))
+
+
+    def init_priorities(self, cg):
+        self.cg = cg
+        for e in self.rag.edges():
             self.pq.push(e, self.get_float_priority(e))
+
 
     def contractEdge(self, edge_to_contract):
         #print("     contract edge",edge_to_contract)
         self.pq.deleteItem(edge_to_contract)
 
     def mergeEdges(self, alive_edge, dead_edge):
-        #print("     merge edges",alive_edge, dead_edge)
-
         # get tensors
         ta = self.tl_edge_features[alive_edge]
         td = self.tl_edge_features[dead_edge]
@@ -101,18 +108,35 @@ class ClusterCallback(nifty.graph.EdgeContractionGraphCallback):
         if self.tl_edge_gt[alive_edge] is not None:
             self.tl_edge_gt[alive_edge] = (self.tl_edge_gt[alive_edge] + self.tl_edge_gt[alive_edge])/2
 
-    def mergeNodes(self, aliveNode, deadNode):
-        #("     merge nodes", aliveNode, deadNode)
+    def mergeNodes(self, alive_node, dead_node):
+        #print("     merge nodes", alive_node, dead_node)
+
+        # get tensors
+        ta = self.tl_node_features[alive_node]
+        td = self.tl_node_features[dead_node]
+
+        # merge tensors with a neural network (kind-of)
+        self.tl_node_features[alive_node] = self.node_merge_module(ta, td)
+
         pass
 
-    def contractEdgeDone(self, contractedEdge):
-        #print("     contract edge done", contractedEdge)
-        pass
+    def contractEdgeDone(self, contracted_edge):
+        #print("     contract edge done", contracted_edge)
+        new_node = self.cg.nodeOfDeadEdge(contracted_edge)
+        for node,edge in self.cg.nodeAdjacency(new_node):
+
+            # update prio
+            self.pq.push(edge, self.get_float_priority(edge))
+
+        
 
     # these calls are NOT called by cpp any more
     def get_priority(self, edge_index):
         te = self.tl_edge_features[edge_index]
-        p = self.edge_priority_module(te)
+        u,v = self.cg.uv(edge_index)
+        tu = self.tl_node_features[u]
+        tv = self.tl_node_features[v]
+        p = self.edge_priority_module(te, tu, tv)
         return p
 
     def get_float_priority(self, edge_index):
@@ -132,14 +156,23 @@ class ClusterPseudoModule(object):
         self.n_node_feat_in = n_node_feat_in
 
         # real pytorch modules
-        self.edge_init_module     = nn_modules.EdgeInitModule(n_edge_feat_in=n_edge_feat_in, n_edge_feat_out=n_edge_feat_in)
-        self.edge_merge_module    = nn_modules.EdgeMergeModule(n_feat= n_edge_feat_in)
-        self.edge_priority_module = nn_modules.EdgePriorityModule(n_edge_feat= n_edge_feat_in)
+        self.edge_init_module     = nn_modules.InitModule(n_feat_in=n_edge_feat_in, n_feat_out=n_edge_feat_in)
+        self.node_init_module     = nn_modules.InitModule(n_feat_in=n_node_feat_in, n_feat_out=n_node_feat_in)
+        self.edge_merge_module    = nn_modules.MergeModule(n_feat= n_edge_feat_in)
+        self.node_merge_module    = nn_modules.MergeModule(n_feat= n_node_feat_in)
+
+        self.node_to_edge_feat_module = nn_modules.NodeToEdgeFeatModule(n_feat_in=n_node_feat_in, n_feat_out=n_node_feat_in*2)
+        self.edge_priority_module = nn_modules.EdgePriorityModule(n_edge_feat= n_edge_feat_in, 
+            node_to_edge_feat_module=self.node_to_edge_feat_module,
+            n_node_feat=n_node_feat_in*2)
 
 
         self.nn_modules = [
             self.edge_init_module,    
+            self.node_init_module,
             self.edge_merge_module,   
+            self.node_merge_module,
+            self.node_to_edge_feat_module,
             self.edge_priority_module
         ]
 

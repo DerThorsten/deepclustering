@@ -102,7 +102,7 @@ out_dir = "out"
 # stats of precomputed features:
 # ===================
 # Here we train the net
-n_train_iter = 10
+n_train_iter = 1
 n_training_instances = raw_dsets['train'].shape[0]
 raw_dset  = raw_dsets['train']
 pmap_dset = pmap_dsets['train']
@@ -167,7 +167,7 @@ parameters = pseudo_net.parameters()
 from_sratch = True
 try:
     from_sratch = False
-    pseudo_net.load_parameters(os.path.join(out_dir,"params.pkl"))
+    #pseudo_net.load_parameters(os.path.join(out_dir,"params.pkl"))
 except FileNotFoundError:
     pass
 
@@ -188,7 +188,7 @@ if True:
 
 
     # the optimizer
-    learning_rate = 0.00075
+    learning_rate = 0.0075
     optimizer = torch.optim.Adam(parameters, lr=learning_rate)
 
 
@@ -239,6 +239,7 @@ if True:
 
         # here we construct the edge contraction graph
         cg = nifty.graph.edgeContractionGraph(rag, cluster_callback)
+        cluster_callback.init_priorities(cg)
 
         # the loss
         loss = Variable(torch.FloatTensor([1]))
@@ -318,69 +319,71 @@ else :
 
 
 
-    # get a random slice 
-    slice_index = 5
-    print("slice %d"%(slice_index))
+    for slice_index in range(30):
 
-    
-    # get raw data, pmap and gt
-    raw             = raw_dset[slice_index, :, :]
-    pmap            = pmap_dset[slice_index, :, :]
-    #binary_gt_image = gt_dset[slice_index, :, :]
-
-    # oversementation rag and edge gt
-    overseg, rag = utilities.get_overseg_rag(raw=raw, pmap=pmap)
-
-
-    # precomputed features
-    precomputed_feat = utilities.get_precomputed_feat(raw=raw, pmap=pmap, rag=rag)
-    precomputed_edge_feat, precomputed_node_feat  = precomputed_feat
-    
-
-    # normalize
-    precomputed_edge_feat = node_feat_scaler.transform  (precomputed_edge_feat)  
-    precomputed_node_feat = edge_feat_scaler.transform(precomputed_node_feat) 
-
-
-    # generate the cluster callback
-    cluster_callback = pseudo_net.cluster_callback_factory(rag=rag,
-        edge_feat=precomputed_edge_feat,node_feat=precomputed_node_feat)
-
-
-    # here we construct the edge contraction graph
-    cg = nifty.graph.edgeContractionGraph(rag, cluster_callback)
-
-    # the loss
-    loss = Variable(torch.FloatTensor([1]))
-    loss[0] = 0
-
-    # here we do a single round of clustering
-    # which will also give us the loss
-    pq = cluster_callback.pq
-    counter = 0 
-    while(cg.numberOfEdges>=1):
-        
-        #print(cg.numberOfEdges)
-
-        # the lowest edge
-        min_edge = pq.top()
-        min_p = pq.topPriority()
-        print("min p",min_p)
-        if min_p >= 0.5:
-            print("DOOOONE")
-            break
-
-
+        slice_index = slice_index
+        print("slice %d"%(slice_index))
 
         
-        cg.contractEdge(min_edge)
+        # get raw data, pmap and gt
+        raw             = raw_dset[slice_index, :, :]
+        pmap            = pmap_dset[slice_index, :, :]
+        #binary_gt_image = gt_dset[slice_index, :, :]
+
+        # oversementation rag and edge gt
+        overseg, rag = utilities.get_overseg_rag(raw=raw, pmap=pmap)
 
 
-    res = cg.nodeUfd.find(numpy.arange(rag.numberOfNodes))
+        # precomputed features
+        precomputed_feat = utilities.get_precomputed_feat(raw=raw, pmap=pmap, rag=rag)
+        precomputed_edge_feat, precomputed_node_feat  = precomputed_feat
+        
 
-    res = nifty.graph.rag.projectScalarNodeDataToPixels(rag, res)
+        # normalize
+        precomputed_edge_feat = node_feat_scaler.transform  (precomputed_edge_feat)  
+        precomputed_node_feat = edge_feat_scaler.transform(precomputed_node_feat) 
 
-    import pylab
-    pylab.imshow(nifty.segmentation.segmentOverlay(raw, res, 0.2, thin=False))
-    pylab.show()
-    print(res)
+
+        # generate the cluster callback
+        cluster_callback = pseudo_net.cluster_callback_factory(rag=rag,
+            edge_feat=precomputed_edge_feat,node_feat=precomputed_node_feat)
+
+
+        # here we construct the edge contraction graph
+        cg = nifty.graph.edgeContractionGraph(rag, cluster_callback)
+        cluster_callback.init_priorities(cg)
+
+        # the loss
+        loss = Variable(torch.FloatTensor([1]))
+        loss[0] = 0
+
+        # here we do a single round of clustering
+        # which will also give us the loss
+        pq = cluster_callback.pq
+        counter = 0 
+        while(cg.numberOfEdges>=1):
+            
+            #print(cg.numberOfEdges)
+
+            # the lowest edge
+            min_edge = pq.top()
+            min_p = pq.topPriority()
+            print("min p",min_p)
+            if min_p >= 0.5:
+                print("DOOOONE")
+                break
+
+
+
+            
+            cg.contractEdge(min_edge)
+
+
+        res = cg.nodeUfd.find(numpy.arange(rag.numberOfNodes))
+
+        res = nifty.graph.rag.projectScalarNodeDataToPixels(rag, res)
+
+        import pylab
+        pylab.imshow(nifty.segmentation.segmentOverlay(raw, res, 0.2, thin=False))
+        pylab.show()
+        print(res)
