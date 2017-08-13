@@ -11,47 +11,109 @@ import torch.nn.functional as F
 
 
 
+
+
+class Mlp(nn.Module):
+
+    def __init__(self, n_in, n_out, n_hidden=None, n_hidden_factor=2,
+            nl='relu', final_nl='relu', dropout=0.5, resiudal_if_possible=False):
+        super(Mlp, self).__init__()
+
+        # settings
+        if n_hidden is None:
+            n_hidden = int(round(n_hidden_factor * n_in))
+        self.nl = nl
+        self.final_nl = final_nl
+        self.residual = resiudal_if_possible and n_in == n_out
+
+
+
+
+        self.bn_in = torch.nn.BatchNorm1d(n_hidden)
+        self.bn_hidden = torch.nn.BatchNorm1d(n_hidden)
+        # layers
+        self.linear_in = nn.Linear(n_in, n_hidden)
+
+        self.linear_hidden = nn.Linear(n_hidden, n_hidden)
+        self.dropout = nn.Dropout(p=dropout)
+        self.linear_out = nn.Linear(n_hidden, n_out)
+
+        
+
+
+    def non_linearity(self,x, nl_name):
+        if nl_name == 'sigmoid':
+            return F.sigmoid(x)
+        elif nl_name == 'relu':
+            return F.relu(x)
+        else:
+            raise NameError('%s is an unknown nonlinearity'%nl_name)
+
+
+    def forward(self,  x_in):
+
+        # in 
+        x = self.linear_in(x_in)
+        x = self.non_linearity(x, nl_name=self.nl)
+        x = self.bn_in(x)
+
+        # hidden
+        x = self.linear_hidden(x)
+        x = self.non_linearity(x, nl_name=self.nl)
+        x = self.bn_hidden(x)
+        x = self.dropout(x)
+
+        # out
+        x = self.linear_out(x)
+        x = self.non_linearity(x, nl_name=self.final_nl)
+
+        if self.residual:
+            return (x_in + x)/2.0
+        else:
+            return x 
+
+
+
+
+
+
 class NodeToEdgeFeatModule(nn.Module):
 
-        def __init__(self, n_feat_in, n_feat_out):
-            super(NodeToEdgeFeatModule, self).__init__()
-            
-            # acts on inputs
-            self.linear_input = nn.Linear(n_feat_in, n_feat_out)
+    def __init__(self, n_in, n_out):
+        super(NodeToEdgeFeatModule, self).__init__()
+        
+        
+        self.mlp = Mlp(n_in=n_in*2, n_out=n_out, 
+                           resiudal_if_possible=True)
 
-            # acts on residual
-            self.linear_on_sum = nn.Linear(n_feat_in, n_feat_out)
+    def forward(self, xa, xb):
 
-            # acts on concat
-            self.linear_concat = nn.Linear(n_feat_in*2,n_feat_out)
+        # on concat
+        xab = torch.cat([xa, xb], 1)
+        xba = torch.cat([xb, xa], 1)
 
+        xab = self.mlp(xab)
+        xba = self.mlp(xba)
 
-            # acts on all 
-            self.linear_all = nn.Linear(n_feat_out, n_feat_out)
-
-        def forward(self, fa, fb):
-
-            # on input
-            nla = F.relu(self.linear_input(fa))
-            nlb = F.relu(self.linear_input(fa))
-
-            tmp_a = (nla + nlb)/2.0
-
-            # on sum of input
-            tmp_b =  F.relu(self.linear_on_sum((fa+fb)/2.0))
-
-            # on concat
-            cab = torch.cat([fa, fb], 1)
-            cba = torch.cat([fb, fa], 1)
-
-            tmp_ab = self.linear_concat(cab)
-            tmp_ba = self.linear_concat(cab)
-
-            tmp_c = (tmp_ab + tmp_ba)/2
+      
+        return (xab + xba)/2
 
 
-            # on all 
-            return self.linear_all((tmp_a + tmp_b + tmp_c)/3)
+
+
+class SizeRegularizer(nn.Module):
+    def __init__(self, n_edge_feat):
+        super(SizeRegularizer, self).__init__()
+        self.mlp_gamma = Mlp(n_in=n_edge_feat, n_out=1,
+                          final_nl='sigmoid')
+
+    def forward(self, u_size, v_size, edge_features):
+
+        # gamma in the range 0-1
+        gamma = self.mlp_gamma(edge_features)
+
+        tmp = (1.0/u_size)**gamma + (1.0/v_size)**gamma 
+        return 1.0/tmp
 
 
 
@@ -59,31 +121,39 @@ class EdgePriorityModule(nn.Module):
 
         def __init__(self, n_edge_feat, node_to_edge_feat_module, n_node_feat):
             super(EdgePriorityModule, self).__init__()
-            self.n_edge_feat = n_edge_feat
+        
+
             self.node_to_edge_feat_module = node_to_edge_feat_module
-            fac = 2
-            self.linear_1 = nn.Linear(n_edge_feat+n_node_feat,n_edge_feat*fac)
-            self.linear_2 = nn.Linear(n_edge_feat*fac,n_edge_feat*fac)
-            self.linear_3 = nn.Linear(n_edge_feat*fac,n_edge_feat*fac)
-            #self.linear_4 = nn.Linear(n_edge_feat*fac,n_edge_feat*fac)
-            #self.linear_5 = nn.Linear(n_edge_feat*fac,n_edge_feat*fac)
-            self.linear_6 = nn.Linear(n_edge_feat*fac,1)
+            self.mlp_raw_prio = Mlp(n_in=n_edge_feat + n_node_feat, n_out=1,
+                          final_nl='sigmoid')
+
+            self.mlp_prio = Mlp(n_in=3,n_hidden=9, n_out=1,
+                          final_nl='sigmoid')
 
 
-        def forward(self, edge_features, fu, fv):
+            self.size_regularizer_mlp = SizeRegularizer(n_edge_feat=n_edge_feat + n_node_feat)
+            
 
-            from_node_feat = self.node_to_edge_feat_module(fu, fv)
+        def forward(self, edge_features, fu, fv, e_size, u_size, v_size):
 
-            concat_l = torch.cat([from_node_feat,edge_features],1)
+            from_nodes = self.node_to_edge_feat_module(fu, fv)
+            all_feat = torch.cat([edge_features, from_nodes], 1)
+            raw_prio = self.mlp_raw_prio(all_feat)
+            size_reg = self.size_regularizer_mlp(u_size=u_size,v_size=v_size,edge_features=all_feat)
+            size_reg = torch.unsqueeze(size_reg,0)
+            size_weighted_prio = raw_prio*size_reg/100.0
 
-            res_1 =  (F.relu(self.linear_1(concat_l)))
-            res_2 =  (F.relu(self.linear_2(res_1)) + res_1)/2.0
-            res_3 =  (F.relu(self.linear_3(res_2)) + res_1 + res_2)/3.0
-            #res_4 =  (F.relu(self.linear_4(res_3)) + res_1 + res_2 + res_3)/4.0
-            #res_5 =  (F.relu(self.linear_5(res_4)))
-            res =  F.sigmoid(self.linear_6(res_3))
+            final_feat = torch.cat([raw_prio, size_reg, size_weighted_prio],1)
+            beta = 0.85 
+            return beta*self.mlp_prio(final_feat) + (1.0 - beta )*raw_prio
 
-            return res
+
+
+
+            
+
+            
+       
 
 
 
@@ -92,14 +162,13 @@ class InitModule(nn.Module):
 
         def __init__(self, n_feat_in, n_feat_out):
             super(InitModule, self).__init__()
-            self.n_feat_in = n_feat_in
-            self.n_feat_out = n_feat_out
-            self.linear_1 = nn.Linear(n_feat_in,n_feat_out)
-           
-        def forward(self, features):
-            res_1 =  (F.relu(self.linear_1(features))+features)/2.0
-            return res_1
 
+
+            self.mlp = Mlp(n_in=n_feat_in, n_out=n_feat_out, 
+                           resiudal_if_possible=True)
+
+        def forward(self, x):
+            return  self.mlp(x)
 
 
 
@@ -122,8 +191,14 @@ class MergeModule(nn.Module):
 
         self.linear_2 = nn.Linear(n_feat*2,n_feat)
 
+        self.dropout = nn.Dropout(p=0.3)
+
 
     def forward(self, x_a, x_b):
+
+        x_a = self.dropout(x_a)
+        x_b = self.dropout(x_b)
+
         ##################################
         # layers on inputs themselfs
         ##################################
@@ -147,6 +222,8 @@ class MergeModule(nn.Module):
         res_residual  = F.relu(self.linear_residual((r_a + r_b)/2))
 
         res = (res_concat + res_residual)/2.0
+
+        res = self.dropout(res)
 
         res = F.relu(self.linear_2(res)) 
 

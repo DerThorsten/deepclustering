@@ -167,7 +167,11 @@ parameters = pseudo_net.parameters()
 from_sratch = True
 try:
     from_sratch = False
-    #pseudo_net.load_parameters(os.path.join(out_dir,"params.pkl"))
+    try:
+        pseudo_net.load_parameters(os.path.join(out_dir,"params.pkl"))
+    except KeyError as k:
+        print('continuing with load error',k)
+
 except FileNotFoundError:
     pass
 
@@ -185,10 +189,11 @@ if True:
     # ===================
     # Here we train the net
 
-
+    # enable training mode
+    pseudo_net.train()
 
     # the optimizer
-    learning_rate = 0.0075
+    learning_rate = 0.001
     optimizer = torch.optim.Adam(parameters, lr=learning_rate)
 
 
@@ -209,7 +214,7 @@ if True:
 
         # get a random slice 
         slice_index = numpy.random.randint(n_training_instances)
-        print("training iter%d using slice %d"%(train_iter,slice_index))
+        #print("training iter%d using slice %d"%(train_iter,slice_index))
 
         
         # get raw data, pmap and gt
@@ -232,7 +237,7 @@ if True:
 
 
         # generate the cluster callback
-        cluster_callback = pseudo_net.cluster_callback_factory(rag=rag,
+        cluster_callback = pseudo_net.cluster_callback_factory(shape=raw.shape,rag=rag,
             edge_feat=precomputed_edge_feat,node_feat=precomputed_node_feat,
             edge_gt=edge_gt)
 
@@ -261,13 +266,43 @@ if True:
                 #print("early exit v2.0")
                 break
 
+
+
             #get the gt of this very edge
             gt = cluster_callback.get_gt(min_edge)
             float_gt = gt.data.numpy()[0]
 
             #print("min_edge",min_edge,"min_p",min_p,"gt",float_gt)
 
-            prio_tensor = cluster_callback.get_priority(min_edge)
+
+
+
+            edge_size_t = cluster_callback.get_edge_size_tensor(min_edge)
+            u_size_t = cluster_callback.get_node_size_tensor(cg.u(min_edge))
+            v_size_t = cluster_callback.get_node_size_tensor(cg.v(min_edge))
+
+
+
+
+            prio_t = cluster_callback.get_priority(min_edge)
+
+   
+
+
+
+            def loss_function(float_gt, prio_t, edge_size_t):
+                binary_gt = int(round(float_gt))
+                certainty = ((1+ (10.0*abs(0.5-float_gt)))**2)/100.0
+
+                loss = None
+                if(binary_gt == 0):
+                    loss = prio_t*edge_size_t*certainty
+                else:
+                    loss = (1.0 - prio_t)*edge_size_t*certainty
+
+                return loss
+
+
 
             # if gt wants to merge
             if(float_gt < 0.5):
@@ -275,13 +310,14 @@ if True:
                 # we merge
                 cg.contractEdge(min_edge)
 
-                # it would be better if  min_p would approach zero
-                loss += prio_tensor
-
+                loss += loss_function(float_gt=float_gt, prio_t=prio_t,
+                                      edge_size_t=edge_size_t)
 
             # gt want to keep them separated
             else:
-                loss += 1.0 - prio_tensor
+                loss += loss_function(float_gt=float_gt, prio_t=prio_t,
+                                      edge_size_t=edge_size_t)
+
                 
                 # yes this no bug
                 pq.push(min_edge, 99.0)
@@ -311,6 +347,10 @@ if True:
 
 
 else :
+
+
+    # enable prediction/test/eval  mode
+    pseudo_net.eval()
 
     raw_dset  = raw_dsets['test']
     pmap_dset = pmap_dsets['test']
@@ -345,7 +385,7 @@ else :
 
 
         # generate the cluster callback
-        cluster_callback = pseudo_net.cluster_callback_factory(rag=rag,
+        cluster_callback = pseudo_net.cluster_callback_factory(shape=raw.shape,rag=rag,
             edge_feat=precomputed_edge_feat,node_feat=precomputed_node_feat)
 
 
@@ -369,7 +409,7 @@ else :
             min_edge = pq.top()
             min_p = pq.topPriority()
             print("min p",min_p)
-            if min_p >= 0.5:
+            if min_p >= 0.95:
                 print("DOOOONE")
                 break
 
