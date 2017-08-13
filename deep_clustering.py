@@ -218,12 +218,14 @@ if True:
 
         
         # get raw data, pmap and gt
-        raw             = raw_dset[slice_index, :, :]
-        pmap            = pmap_dset[slice_index, :, :]
-        binary_gt_image = gt_dset[slice_index, :, :]
+        raw             = raw_dset[slice_index, 10:100,10:100]
+        pmap            = pmap_dset[slice_index, 10:100,10:100]
+        binary_gt_image = gt_dset[slice_index, 10:100,10:100]
 
         # oversementation rag and edge gt
         overseg, rag, edge_gt = utilities.get_overseg_rag_and_gt(raw=raw, pmap=pmap, binary_gt_image=binary_gt_image)
+        assert overseg.min() == 0
+        assert overseg.max() + 1 == rag.numberOfNodes
         edge_gt = edge_gt.round()
 
         # precomputed features
@@ -237,7 +239,7 @@ if True:
 
 
         # generate the cluster callback
-        cluster_callback = pseudo_net.cluster_callback_factory(shape=raw.shape,rag=rag,
+        cluster_callback = pseudo_net.cluster_callback_factory(overseg=overseg,raw=raw,rag=rag,
             edge_feat=precomputed_edge_feat,node_feat=precomputed_node_feat,
             edge_gt=edge_gt)
 
@@ -362,7 +364,7 @@ else :
     for slice_index in range(30):
 
         slice_index = slice_index
-        print("slice %d"%(slice_index))
+        print("slice %dr[None,None,:,:]"%(slice_index))
 
         
         # get raw data, pmap and gt
@@ -385,7 +387,7 @@ else :
 
 
         # generate the cluster callback
-        cluster_callback = pseudo_net.cluster_callback_factory(shape=raw.shape,rag=rag,
+        cluster_callback = pseudo_net.cluster_callback_factory(overseg=overseg,raw=raw,rag=rag,
             edge_feat=precomputed_edge_feat,node_feat=precomputed_node_feat)
 
 
@@ -409,7 +411,7 @@ else :
             min_edge = pq.top()
             min_p = pq.topPriority()
             print("min p",min_p)
-            if min_p >= 0.95:
+            if min_p >= 0.5:
                 print("DOOOONE")
                 break
 

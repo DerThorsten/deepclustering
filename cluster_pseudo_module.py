@@ -34,11 +34,12 @@ def scalar_to_float_var(x, requires_grad=True):
 class ClusterCallback(nifty.graph.EdgeContractionGraphCallback):
 
 
-    def __init__(self, shape, cluster_net, rag, edge_feat, node_feat, edge_gt = None):
+    def __init__(self, overseg, raw, cluster_net, rag, edge_feat, node_feat, edge_gt = None):
 
         super(ClusterCallback, self).__init__()
 
-
+        self.raw = raw
+        shape = self.raw.shape
         self.rag = rag
         # accumulate the mean edge value
         # along the superpixel boundaries
@@ -72,10 +73,86 @@ class ClusterCallback(nifty.graph.EdgeContractionGraphCallback):
         self.tl_node_sizes  = [None]*rag.numberOfNodes
 
 
+        # pixel wise module
+        r = self.raw.astype('float32')/255.0
+        r = r[None,None,:,:]
+        r = numpy_to_float_var(r)
+
+        pixel_node_feat_t = self.cluster_net.pixel_node_feat_moudle(r)
+        pixel_edge_feat_t = self.cluster_net.pixel_edge_feat_moudle(r)
+
+
+        self.tl_node_acc_feat  = [None]*rag.numberOfNodes
+        self.tl_edge_acc_feat  = [None]*rag.numberOfEdges
+
+
+        # accumulate the sum =)
+        for x in range(shape[0]):
+            for y in range(shape[1]):
+
+                # nodes
+                nl_u = overseg[x, y]
+                old_nf = self.tl_node_acc_feat[nl_u] 
+                if old_nf is None:
+                    self.tl_node_acc_feat[nl_u] = pixel_node_feat_t[0,:,x,y]
+                else:
+                    old_nf = self.tl_node_acc_feat[nl_u] 
+                    self.tl_node_acc_feat[nl_u] = old_nf + pixel_node_feat_t[0,:,x,y]
+
+
+                # edges
+
+                if x + 1 < shape[0]:
+                    nl_v = overseg[x+1, y]
+
+                    if(nl_u != nl_v):
+
+                        el = rag.findEdge(nl_u, nl_v)
+                        assert el >= 0
+                        old_ef = self.tl_edge_acc_feat[nl_u] 
+
+                        if old_ef is None:
+                            self.tl_edge_acc_feat[el] = pixel_edge_feat_t[0,:,x,y] + pixel_edge_feat_t[0,:,x+1,y]
+                        else:
+                            old_ef = self.tl_edge_acc_feat[nl_u] 
+                            self.tl_edge_acc_feat[el] = old_ef + pixel_edge_feat_t[0,:,x,y] + pixel_edge_feat_t[0,:,x+1,y]
+
+                if y + 1 < shape[1]:
+                    nl_v = overseg[x, y+1]
+
+                    if(nl_u != nl_v):
+
+                        el = rag.findEdge(nl_u, nl_v)
+                        assert el >= 0
+                        old_ef = self.tl_edge_acc_feat[el] 
+
+                        if old_ef is None:
+                            self.tl_edge_acc_feat[el] = pixel_edge_feat_t[0,:,x,y] + pixel_edge_feat_t[0,:,x,y+1]
+                        else:
+                            old_ef = self.tl_edge_acc_feat[el] 
+                            self.tl_edge_acc_feat[el] = old_ef + pixel_edge_feat_t[0,:,x,y] + pixel_edge_feat_t[0,:,x,y+1]
+
+
+
+
+
+
+
         for e in rag.edges():
             ef = edge_feat[e,:]
             ef = numpy_to_float_var(ef[None,:])
-            self.tl_edge_features[e] = self.edge_init_module(ef)
+
+            
+
+            edge_feat_a = self.edge_init_module(ef)
+            edge_feat_b = self.tl_edge_acc_feat[e]
+            if  edge_feat_b is  None:
+                print("e",e,'uv',rag.uv(e))
+            assert edge_feat_b is not None
+            edge_feat_b = torch.unsqueeze(edge_feat_b,0)
+            concat_edge_feat= torch.cat([edge_feat_a, edge_feat_b],1)
+
+            self.tl_edge_features[e] = concat_edge_feat
             self.tl_edge_sizes[e] = scalar_to_float_var(edge_sizes[e])
 
 
@@ -85,19 +162,25 @@ class ClusterCallback(nifty.graph.EdgeContractionGraphCallback):
         for n in rag.nodes():
             nf = node_feat[n,:]
             nf  = numpy_to_float_var(nf[None,:])
-            self.tl_node_features[n] = self.node_init_module(nf)
+
+
+            node_feat_a = self.node_init_module(nf)
+            node_feat_b = self.tl_node_acc_feat[n]
+            node_feat_b = torch.unsqueeze(node_feat_b,0)
+            concat_node_feat= torch.cat([node_feat_a, node_feat_b],1)
+
+            self.tl_node_features[n] = concat_node_feat
             self.tl_node_sizes[n] = scalar_to_float_var(node_sizes[n])
 
         
-
+        
 
      
 
         # the prio-queue
         self.pq =nifty.tools.ChangeablePriorityQueue(rag.numberOfEdges)
 
-        #for e in rag.edges():
-        #    self.pq.push(e, self.get_float_priority(e))
+
 
 
     def init_priorities(self, cg):
@@ -203,18 +286,32 @@ class ClusterPseudoModule(object):
         self.n_node_feat_in = n_node_feat_in
 
         # real pytorch modules
+
+
+        self.pixel_node_feat_moudle = nn_modules.PixelFeatModule(out_channels=8)
+        self.pixel_edge_feat_moudle = nn_modules.PixelFeatModule(out_channels=4)
+        n_acc_node =  self.pixel_node_feat_moudle.out_channels
+        n_acc_edge =  self.pixel_edge_feat_moudle.out_channels
+
         self.edge_init_module     = nn_modules.InitModule(n_feat_in=n_edge_feat_in, n_feat_out=n_edge_feat_in)
         self.node_init_module     = nn_modules.InitModule(n_feat_in=n_node_feat_in, n_feat_out=n_node_feat_in)
-        self.edge_merge_module    = nn_modules.MergeModule(n_feat= n_edge_feat_in)
-        self.node_merge_module    = nn_modules.MergeModule(n_feat= n_node_feat_in)
 
-        self.node_to_edge_feat_module = nn_modules.NodeToEdgeFeatModule(n_in=n_node_feat_in, n_out=n_node_feat_in)
-        self.edge_priority_module = nn_modules.EdgePriorityModule(n_edge_feat= n_edge_feat_in, 
+        self.edge_merge_module    = nn_modules.MergeModule(n_feat= n_edge_feat_in + n_acc_edge)
+        self.node_merge_module    = nn_modules.MergeModule(n_feat= n_node_feat_in + n_acc_node)
+
+        self.node_to_edge_feat_module = nn_modules.NodeToEdgeFeatModule(n_in=n_node_feat_in + n_acc_node, n_out=n_node_feat_in+n_acc_node)
+        self.edge_priority_module = nn_modules.EdgePriorityModule(n_edge_feat= n_edge_feat_in+n_acc_edge, 
             node_to_edge_feat_module=self.node_to_edge_feat_module,
-            n_node_feat=n_node_feat_in)
+            n_node_feat=n_node_feat_in+n_acc_node)
+
+
+
+
 
 
         self.nn_modules = [
+            self.pixel_node_feat_moudle,
+            self.pixel_edge_feat_moudle,
             self.edge_init_module,    
             self.node_init_module,
             self.edge_merge_module,   
@@ -224,8 +321,8 @@ class ClusterPseudoModule(object):
         ]
 
 
-    def cluster_callback_factory(self,shape, rag, edge_feat, node_feat, edge_gt = None):
-        return ClusterCallback(shape=shape,cluster_net=self, rag=rag, 
+    def cluster_callback_factory(self, overseg, raw, rag, edge_feat, node_feat, edge_gt = None):
+        return ClusterCallback(overseg=overseg,raw=raw,cluster_net=self, rag=rag, 
             edge_feat=edge_feat, node_feat=node_feat, 
             edge_gt=edge_gt)
 

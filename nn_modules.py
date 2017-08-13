@@ -55,12 +55,12 @@ class Mlp(nn.Module):
         # in 
         x = self.linear_in(x_in)
         x = self.non_linearity(x, nl_name=self.nl)
-        x = self.bn_in(x)
+        #x = self.bn_in(x)
 
         # hidden
         x = self.linear_hidden(x)
         x = self.non_linearity(x, nl_name=self.nl)
-        x = self.bn_hidden(x)
+        #x = self.bn_hidden(x)
         x = self.dropout(x)
 
         # out
@@ -73,6 +73,26 @@ class Mlp(nn.Module):
             return x 
 
 
+
+class PixelFeatModule(nn.Module):
+    def __init__(self, out_channels=8):
+        super(PixelFeatModule, self).__init__()
+
+        self.out_channels = out_channels
+        oc = out_channels
+        self.relu = nn.ReLU()
+
+        self.conv_0 = torch.nn.Conv2d(in_channels=1,out_channels=oc,kernel_size=(3,3),padding=(1,1))
+        self.conv_1 = torch.nn.Conv2d(in_channels=oc,out_channels=oc,kernel_size=(3,3),padding=(1,1))
+        self.conv_2 = torch.nn.Conv2d(in_channels=oc,out_channels=oc,kernel_size=(3,3),padding=(1,1))
+
+        
+
+    def forward(self, x):
+        x = self.relu(self.conv_0(x))
+        x = self.relu(self.conv_1(x))
+        x = self.relu(self.conv_2(x))
+        return x
 
 
 
